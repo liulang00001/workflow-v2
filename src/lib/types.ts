@@ -70,14 +70,16 @@ export interface ExecutionResult {
   summary: string;
   /** 执行耗时(ms) */
   duration: number;
-  /** 代码执行过程的 console 输出 */
+  /** 分析报告（代码中 console.log 输出） */
+  report: string[];
+  /** 系统调试日志（TRACE/DEBUG/INFO） */
   logs: string[];
 }
 
 /** 分析发现 */
 export interface Finding {
   time: string;
-  type: 'lock' | 'unlock' | 'info' | 'error';
+  type: 'success' | 'warning' | 'info' | 'error';
   message: string;
   details?: Record<string, any>;
 }

@@ -1,15 +1,13 @@
 /**
  * AST 解析器：TypeScript 代码 → 流程图
  *
- * 使用 ts-morph 解析代码的控制流结构，自动生成流程图节点和边。
- * 核心映射关系：
- *   - 函数声明 → action 节点
- *   - if/else   → condition 节点 + true/false 分支边
- *   - for/while → loop 节点 + loop-back 边
- *   - return    → end 节点
- *   - 函数调用  → action 节点（引用）
+ * 抽象策略（高可读性优先）：
+ *   - 只为 控制流（if/for）和 辅助函数调用 生成节点
+ *   - 跳过 console.log、简单赋值、变量声明等噪音语句
+ *   - if 块以 continue/return 结尾时，false 分支直接连到后续节点（无汇合节点）
+ *   - 辅助函数折叠为单个 action 节点，点击可跳转源码
  */
-import { Project, SyntaxKind, Node, FunctionDeclaration, IfStatement, ForStatement, Block, SourceFile } from 'ts-morph';
+import { Project, SyntaxKind, Node, FunctionDeclaration, IfStatement, ForStatement, Block } from 'ts-morph';
 import { FlowNode, FlowEdge, FlowChart } from './types';
 
 let nodeCounter = 0;
@@ -29,28 +27,14 @@ export function parseCodeToFlowChart(code: string): FlowChart {
   const nodes: FlowNode[] = [];
   const edges: FlowEdge[] = [];
 
-  // 1. 提取所有顶层函数作为"模块"
   const functions = sourceFile.getFunctions();
   const analyzeFunc = functions.find(f => f.getName() === 'analyze');
   const helperFuncs = functions.filter(f => f.getName() !== 'analyze');
 
-  // 2. 为每个辅助函数生成一个摘要节点（折叠展示）
-  const helperNodeMap = new Map<string, string>();
-  for (const fn of helperFuncs) {
-    const id = nextNodeId();
-    const name = fn.getName() || 'anonymous';
-    helperNodeMap.set(name, id);
-    nodes.push({
-      id,
-      type: 'action',
-      label: name,
-      description: extractFunctionSummary(fn),
-      codeRange: { startLine: fn.getStartLineNumber(), endLine: fn.getEndLineNumber() },
-      position: { x: 0, y: 0 }, // layout 后设置
-    });
-  }
+  // 辅助函数名集合（用于判断语句是否值得生成节点）
+  const helperNames = new Set(helperFuncs.map(f => f.getName() || ''));
 
-  // 3. 解析 analyze 函数的控制流
+  // 解析 analyze 函数的控制流
   if (analyzeFunc) {
     const startId = nextNodeId();
     nodes.push({
@@ -64,9 +48,8 @@ export function parseCodeToFlowChart(code: string): FlowChart {
 
     const body = analyzeFunc.getBody();
     if (body && Node.isBlock(body)) {
-      const lastId = parseBlock(body, nodes, edges, helperNodeMap, startId);
+      const lastId = parseBlock(body, nodes, edges, helperNames, startId);
 
-      // 添加结束节点
       const endId = nextNodeId();
       nodes.push({
         id: endId,
@@ -82,18 +65,48 @@ export function parseCodeToFlowChart(code: string): FlowChart {
     }
   }
 
-  // 4. 自动布局
   autoLayout(nodes, edges);
-
   return { nodes, edges };
 }
+
+// ==================== 判断语句是否"重要" ====================
+
+/** 判断一条语句是否值得生成节点 */
+function isSignificantStatement(text: string, helperNames: Set<string>): boolean {
+  // 跳过 console.log/warn/error
+  if (/^\s*console\.\w+\(/.test(text)) return false;
+  // 跳过纯变量声明（没有调用辅助函数）
+  if (/^(const|let|var)\s+\w+\s*=\s*\d/.test(text)) return false;
+  if (/^(const|let|var)\s+\w+\s*=\s*(true|false|'|"|`)/.test(text)) return false;
+  if (/^(const|let|var)\s+\w+\s*=\s*\[\]/.test(text)) return false;
+  // 跳过简单赋值
+  if (/^\w+\s*=\s*(true|false|\d+);?$/.test(text.trim())) return false;
+  // 包含辅助函数调用 → 重要
+  for (const name of helperNames) {
+    if (text.includes(`${name}(`)) return true;
+  }
+  // findings.push → 重要
+  if (text.includes('findings.push')) return true;
+  // 其余跳过
+  return false;
+}
+
+/** 从语句文本中提取被调用的辅助函数名 */
+function findCalledHelper(text: string, helperNames: Set<string>): string | null {
+  for (const name of helperNames) {
+    if (text.includes(`${name}(`)) return name;
+  }
+  return null;
+}
+
+// ==================== 块解析（核心） ====================
 
 /** 解析代码块，返回最后一个节点的 ID */
 function parseBlock(
   block: Block,
   nodes: FlowNode[],
   edges: FlowEdge[],
-  helperMap: Map<string, string>,
+  helperNames: Set<string>,
   prevId: string,
 ): string {
   let currentPrev = prevId;
@@ -101,40 +114,41 @@ function parseBlock(
   for (const stmt of block.getStatements()) {
     const kind = stmt.getKind();
 
-    // if 语句 → 条件分支节点
     if (kind === SyntaxKind.IfStatement) {
-      const ifStmt = stmt as IfStatement;
-      currentPrev = parseIfStatement(ifStmt, nodes, edges, helperMap, currentPrev);
+      currentPrev = parseIfStatement(stmt as IfStatement, nodes, edges, helperNames, currentPrev);
     }
-    // for 语句 → 循环节点
     else if (kind === SyntaxKind.ForStatement) {
-      const forStmt = stmt as ForStatement;
-      currentPrev = parseForStatement(forStmt, nodes, edges, helperMap, currentPrev);
+      currentPrev = parseForStatement(stmt as ForStatement, nodes, edges, helperNames, currentPrev);
     }
-    // continue → 跳过（循环内处理）
-    else if (kind === SyntaxKind.ContinueStatement) {
-      // continue 会在 loop 内处理
+    else if (kind === SyntaxKind.ContinueStatement || kind === SyntaxKind.BreakStatement) {
+      // 由上层处理
     }
-    // return 语句
     else if (kind === SyntaxKind.ReturnStatement) {
-      const retId = nextNodeId();
-      nodes.push({
-        id: retId,
-        type: 'action',
-        label: 'return',
-        description: stmt.getText().substring(0, 80),
-        codeRange: { startLine: stmt.getStartLineNumber(), endLine: stmt.getEndLineNumber() },
-        position: { x: 0, y: 0 },
-      });
-      edges.push({ id: nextEdgeId(), source: currentPrev, target: retId, type: 'next' });
-      currentPrev = retId;
-    }
-    // 表达式语句（函数调用、赋值等）
-    else if (kind === SyntaxKind.ExpressionStatement) {
+      // 只在 analyze 顶层 return 才生成节点（结束前的汇总 return）
       const text = stmt.getText();
-      // 检查是否包含辅助函数调用
-      const calledHelper = findCalledHelper(text, helperMap);
-      const label = calledHelper || summarizeExpression(text);
+      if (text.includes('findings') || text.includes('summary')) {
+        const retId = nextNodeId();
+        nodes.push({
+          id: retId,
+          type: 'action',
+          label: '汇总结果',
+          description: '返回 findings 和 summary',
+          codeRange: { startLine: stmt.getStartLineNumber(), endLine: stmt.getEndLineNumber() },
+          position: { x: 0, y: 0 },
+        });
+        edges.push({ id: nextEdgeId(), source: currentPrev, target: retId, type: 'next' });
+        currentPrev = retId;
+      }
+    }
+    else {
+      // 表达式语句 / 变量声明：只保留"重要"的
+      const text = stmt.getText();
+      if (!isSignificantStatement(text, helperNames)) continue;
+
+      const helper = findCalledHelper(text, helperNames);
+      const label = helper
+        ? `调用 ${helper}()`
+        : text.includes('findings.push') ? '记录发现' : text.substring(0, 30);
 
       const actionId = nextNodeId();
       nodes.push({
@@ -148,35 +162,18 @@ function parseBlock(
       edges.push({ id: nextEdgeId(), source: currentPrev, target: actionId, type: 'next' });
       currentPrev = actionId;
     }
-    // 变量声明
-    else if (kind === SyntaxKind.VariableStatement) {
-      const text = stmt.getText();
-      const calledHelper = findCalledHelper(text, helperMap);
-      const label = calledHelper || summarizeExpression(text);
-
-      const varId = nextNodeId();
-      nodes.push({
-        id: varId,
-        type: 'action',
-        label,
-        description: text.substring(0, 120),
-        codeRange: { startLine: stmt.getStartLineNumber(), endLine: stmt.getEndLineNumber() },
-        position: { x: 0, y: 0 },
-      });
-      edges.push({ id: nextEdgeId(), source: currentPrev, target: varId, type: 'next' });
-      currentPrev = varId;
-    }
   }
 
   return currentPrev;
 }
 
-/** 解析 if 语句 */
+// ==================== if 语句解析 ====================
+
 function parseIfStatement(
   ifStmt: IfStatement,
   nodes: FlowNode[],
   edges: FlowEdge[],
-  helperMap: Map<string, string>,
+  helperNames: Set<string>,
   prevId: string,
 ): string {
   const condText = ifStmt.getExpression().getText();
@@ -185,49 +182,90 @@ function parseIfStatement(
   nodes.push({
     id: condId,
     type: 'condition',
-    label: summarizeCondition(condText),
+    label: summarizeCondition(condText, helperNames),
     description: condText,
-    conditionText: condText,
-    codeRange: { startLine: ifStmt.getStartLineNumber(), endLine: ifStmt.getStartLineNumber() },
+    conditionText: condText.length > 60 ? condText.substring(0, 58) + '..' : condText,
+    codeRange: { startLine: ifStmt.getStartLineNumber(), endLine: ifStmt.getEndLineNumber() },
     position: { x: 0, y: 0 },
   });
   edges.push({ id: nextEdgeId(), source: prevId, target: condId, type: 'next' });
 
-  // true 分支
   const thenBlock = ifStmt.getThenStatement();
+  const elseStmt = ifStmt.getElseStatement();
+
+  // 检查 then 块是否以 continue/return/break 结尾
+  const thenEndsWithJump = Node.isBlock(thenBlock) && blockEndsWithJump(thenBlock);
+
+  if (thenEndsWithJump && !elseStmt) {
+    // 常见模式：if (cond) { ...; continue; } — 不需要汇合节点
+    // true 分支
+    if (Node.isBlock(thenBlock)) {
+      const thenEndId = parseBlock(thenBlock, nodes, edges, helperNames, condId);
+      if (thenEndId !== condId) {
+        // 找到 true 分支第一个子节点
+        const firstThenChild = findFirstChild(condId, thenEndId, edges);
+        if (firstThenChild) {
+          // 把 condId → firstThenChild 的 next 边标记为 true
+          markEdgeType(condId, firstThenChild, edges, '是', 'true');
+        }
+      } else {
+        edges.push({ id: nextEdgeId(), source: condId, target: condId, label: '是', type: 'true' });
+      }
+    }
+    // false 分支 → 连到后续（返回 condId，让后续语句从 condId 的 false 出发）
+    // 用一个占位 ID，让调用方连接
+    const passId = nextNodeId();
+    nodes.push({
+      id: passId,
+      type: 'action',
+      label: '继续',
+      description: '',
+      codeRange: { startLine: ifStmt.getEndLineNumber(), endLine: ifStmt.getEndLineNumber() },
+      position: { x: 0, y: 0 },
+    });
+    edges.push({ id: nextEdgeId(), source: condId, target: passId, label: '否', type: 'false' });
+    return passId;
+  }
+
+  // 通用处理：有汇合
   const mergeId = nextNodeId();
   nodes.push({
     id: mergeId,
     type: 'action',
-    label: '(汇合)',
+    label: '▸',
     description: '',
     codeRange: { startLine: ifStmt.getEndLineNumber(), endLine: ifStmt.getEndLineNumber() },
     position: { x: 0, y: 0 },
   });
 
+  // true 分支
   if (Node.isBlock(thenBlock)) {
-    const thenEndId = parseBlock(thenBlock, nodes, edges, helperMap, condId);
-    // 检查 then 块是否以 continue/return 结尾（不需要连接到 merge）
-    const lastStmt = thenBlock.getStatements().at(-1);
-    const endsWithJump = lastStmt && (lastStmt.getKind() === SyntaxKind.ContinueStatement || lastStmt.getKind() === SyntaxKind.ReturnStatement);
-
-    edges.push({ id: nextEdgeId(), source: condId, target: nodes.find(n => n.id === thenEndId) ? thenEndId : condId, label: '是', type: 'true' });
-    if (!endsWithJump) {
+    const thenEndId = parseBlock(thenBlock, nodes, edges, helperNames, condId);
+    const firstThenChild = findFirstChild(condId, thenEndId, edges);
+    if (firstThenChild) {
+      markEdgeType(condId, firstThenChild, edges, '是', 'true');
+    }
+    if (!thenEndsWithJump) {
       edges.push({ id: nextEdgeId(), source: thenEndId, target: mergeId, type: 'next' });
     }
   }
 
   // false 分支
-  const elseStmt = ifStmt.getElseStatement();
   if (elseStmt) {
     if (Node.isBlock(elseStmt)) {
-      const elseEndId = parseBlock(elseStmt, nodes, edges, helperMap, condId);
-      edges.push({ id: nextEdgeId(), source: condId, target: elseEndId !== condId ? elseEndId : condId, label: '否', type: 'false' });
+      const elseEndId = parseBlock(elseStmt, nodes, edges, helperNames, condId);
+      const firstElseChild = findFirstChild(condId, elseEndId, edges);
+      if (firstElseChild) {
+        markEdgeType(condId, firstElseChild, edges, '否', 'false');
+      }
       edges.push({ id: nextEdgeId(), source: elseEndId, target: mergeId, type: 'next' });
     } else if (Node.isIfStatement(elseStmt)) {
-      // else if 递归
-      const elseIfEndId = parseIfStatement(elseStmt, nodes, edges, helperMap, condId);
-      edges.push({ id: nextEdgeId(), source: condId, target: elseIfEndId, label: '否', type: 'false' });
+      const elseIfEndId = parseIfStatement(elseStmt, nodes, edges, helperNames, condId);
+      const firstElseChild = findFirstChild(condId, elseIfEndId, edges);
+      if (firstElseChild) {
+        markEdgeType(condId, firstElseChild, edges, '否', 'false');
+      }
+      edges.push({ id: nextEdgeId(), source: elseIfEndId, target: mergeId, type: 'next' });
     }
   } else {
     edges.push({ id: nextEdgeId(), source: condId, target: mergeId, label: '否', type: 'false' });
@@ -236,26 +274,26 @@ function parseIfStatement(
   return mergeId;
 }
 
-/** 解析 for 语句 */
+// ==================== for 语句解析 ====================
+
 function parseForStatement(
   forStmt: ForStatement,
   nodes: FlowNode[],
   edges: FlowEdge[],
-  helperMap: Map<string, string>,
+  helperNames: Set<string>,
   prevId: string,
 ): string {
   const initText = forStmt.getInitializer()?.getText() || '';
   const condText = forStmt.getCondition()?.getText() || '';
-  const loopLabel = summarizeLoop(initText, condText);
 
   const loopId = nextNodeId();
   nodes.push({
     id: loopId,
     type: 'loop',
-    label: loopLabel,
+    label: summarizeLoop(initText, condText),
     description: `for (${initText}; ${condText}; ...)`,
     conditionText: condText,
-    codeRange: { startLine: forStmt.getStartLineNumber(), endLine: forStmt.getStartLineNumber() },
+    codeRange: { startLine: forStmt.getStartLineNumber(), endLine: forStmt.getEndLineNumber() },
     position: { x: 0, y: 0 },
   });
   edges.push({ id: nextEdgeId(), source: prevId, target: loopId, type: 'next' });
@@ -263,33 +301,98 @@ function parseForStatement(
   // 循环体
   const body = forStmt.getStatement();
   if (Node.isBlock(body)) {
-    const bodyEndId = parseBlock(body, nodes, edges, helperMap, loopId);
-    // loop-back 边
-    edges.push({ id: nextEdgeId(), source: bodyEndId, target: loopId, type: 'loop-back', label: '继续循环' });
+    const bodyEndId = parseBlock(body, nodes, edges, helperNames, loopId);
+    if (bodyEndId !== loopId) {
+      edges.push({ id: nextEdgeId(), source: bodyEndId, target: loopId, type: 'loop-back', label: '继续循环' });
+    }
   }
 
-  // 循环结束出口
-  const exitId = nextNodeId();
-  nodes.push({
-    id: exitId,
-    type: 'action',
-    label: '循环结束',
-    description: `${loopLabel} 遍历完成`,
-    codeRange: { startLine: forStmt.getEndLineNumber(), endLine: forStmt.getEndLineNumber() },
-    position: { x: 0, y: 0 },
-  });
-  edges.push({ id: nextEdgeId(), source: loopId, target: exitId, label: '遍历完成', type: 'next' });
-
-  return exitId;
+  return loopId; // 循环节点本身就是出口，后续节点直接连到它
 }
 
 // ==================== 工具函数 ====================
 
+function blockEndsWithJump(block: Block): boolean {
+  const last = block.getStatements().at(-1);
+  if (!last) return false;
+  const kind = last.getKind();
+  if (kind === SyntaxKind.ContinueStatement || kind === SyntaxKind.ReturnStatement || kind === SyntaxKind.BreakStatement) {
+    return true;
+  }
+  // if 块最后是 if，且 if 内以 jump 结尾
+  if (kind === SyntaxKind.IfStatement) {
+    const then = (last as IfStatement).getThenStatement();
+    if (Node.isBlock(then)) return blockEndsWithJump(then);
+  }
+  return false;
+}
+
+/** 从 edges 中找到 sourceId 的第一个 next 类型子节点 */
+function findFirstChild(sourceId: string, endId: string, edges: FlowEdge[]): string | null {
+  for (const e of edges) {
+    if (e.source === sourceId && e.type === 'next' && e.target !== sourceId) {
+      return e.target;
+    }
+  }
+  return null;
+}
+
+/** 将 source→target 的边标记为指定类型 */
+function markEdgeType(source: string, target: string, edges: FlowEdge[], label: string, type: 'true' | 'false') {
+  for (const e of edges) {
+    if (e.source === source && e.target === target && e.type === 'next') {
+      e.type = type;
+      e.label = label;
+      return;
+    }
+  }
+}
+
+/** 通用条件摘要：从代码条件自动推导人类可读标签 */
+function summarizeCondition(condText: string, helperNames: Set<string>): string {
+  // 优先匹配辅助函数调用
+  for (const name of helperNames) {
+    if (condText.includes(name)) {
+      const negated = condText.includes(`!${name}`);
+      const readable = camelToReadable(name);
+      return negated ? `${readable}?（否）` : `${readable}?`;
+    }
+  }
+
+  // 通用模式匹配
+  if (condText.includes('.passed')) return '条件是否通过?';
+  if (condText.includes('===') || condText.includes('!==')) {
+    const match = condText.match(/(\w+)\s*[!=]==?\s*(.+)/);
+    if (match) return `${match[1]} == ${match[2].substring(0, 15)}?`;
+  }
+  if (condText.length > 35) return condText.substring(0, 33) + '..';
+  return condText + '?';
+}
+
+/** 通用循环摘要 */
+function summarizeLoop(initText: string, condText: string): string {
+  // 遍历数据行
+  if (condText.includes('data.length') || condText.includes('.length')) return '遍历数据行';
+  // 提取循环范围
+  const rangeMatch = condText.match(/<=?\s*(\d+)/);
+  if (rangeMatch) return `循环 ${rangeMatch[1]} 次检查`;
+  return `循环`;
+}
+
+/** 驼峰命名 → 可读中文标签 */
+function camelToReadable(name: string): string {
+  // check/is 前缀去掉，拼接剩余
+  const stripped = name
+    .replace(/^(check|is|has|can|should|get|find|scan|compute|calc)/, '')
+    .replace(/([A-Z])/g, ' $1')
+    .trim();
+  if (!stripped) return name;
+  return stripped.charAt(0).toUpperCase() + stripped.slice(1);
+}
+
 function extractFunctionSummary(fn: FunctionDeclaration): string {
-  // 提取函数的第一行注释或首行逻辑
   const jsDocs = fn.getJsDocs();
   if (jsDocs.length > 0) return jsDocs[0].getComment()?.toString() || fn.getName() || '';
-
   const body = fn.getBody();
   if (body && Node.isBlock(body)) {
     const first = body.getStatements()[0];
@@ -298,53 +401,15 @@ function extractFunctionSummary(fn: FunctionDeclaration): string {
   return fn.getName() || 'function';
 }
 
-function findCalledHelper(text: string, helperMap: Map<string, string>): string | null {
-  for (const [name] of helperMap) {
-    if (text.includes(`${name}(`)) return name;
-  }
-  return null;
-}
+// ==================== 自动布局 ====================
 
-function summarizeExpression(text: string): string {
-  // 精简表达式为短标签
-  if (text.includes('console.log')) return 'log';
-  if (text.includes('.push(')) {
-    const match = text.match(/(\w+)\.push/);
-    return match ? `添加到 ${match[1]}` : 'push';
-  }
-  if (text.includes('findings.push')) return '记录发现';
-  if (text.length > 30) return text.substring(0, 28) + '..';
-  return text.replace(/;$/, '');
-}
-
-function summarizeCondition(condText: string): string {
-  // 将代码条件简化为人类可读标签
-  if (condText.includes('!allDoorsClosed') || condText.includes('allDoorsClosed')) return '所有门是否关闭';
-  if (condText.includes('isLeavingCar')) return '是否离车场景';
-  if (condText.includes('checkBluetooth')) return '蓝牙是否连接';
-  if (condText.includes('checkBasicConditions')) return '基础条件检查';
-  if (condText.includes('checkLockPosition')) return '蓝牙定位检查';
-  if (condText.includes('doorJustClosed')) return '检测到门关闭跳变';
-  if (condText.includes('.passed')) return '条件是否通过';
-  if (condText.length > 40) return condText.substring(0, 38) + '..';
-  return condText;
-}
-
-function summarizeLoop(initText: string, condText: string): string {
-  if (condText.includes('data.length')) return '遍历所有数据行';
-  if (condText.includes('<= 8') || condText.includes('< 8')) return '8秒连续检查';
-  if (condText.includes('<= 608') || condText.includes('600')) return '600秒定位检查';
-  return `循环: ${condText.substring(0, 30)}`;
-}
-
-/** 自动布局：简单的层次布局 */
 function autoLayout(nodes: FlowNode[], edges: FlowEdge[]) {
-  // BFS 分层
   if (nodes.length === 0) return;
 
   const startNode = nodes.find(n => n.type === 'start') || nodes[0];
   const adjacency = new Map<string, string[]>();
   for (const edge of edges) {
+    if (edge.type === 'loop-back') continue; // 回边不参与分层
     if (!adjacency.has(edge.source)) adjacency.set(edge.source, []);
     adjacency.get(edge.source)!.push(edge.target);
   }
@@ -366,12 +431,18 @@ function autoLayout(nodes: FlowNode[], edges: FlowEdge[]) {
     }
   }
 
+  // 未被 BFS 到的节点放到最底部
+  const maxLevel = Math.max(...Array.from(levels.values()), 0);
+  for (const node of nodes) {
+    if (!levels.has(node.id)) levels.set(node.id, maxLevel + 1);
+  }
+
   // 按层分配坐标
   const levelCounts = new Map<number, number>();
   for (const node of nodes) {
     const level = levels.get(node.id) || 0;
     const col = levelCounts.get(level) || 0;
     levelCounts.set(level, col + 1);
-    node.position = { x: 250 + col * 220, y: 60 + level * 120 };
+    node.position = { x: 250 + col * 220, y: 60 + level * 100 };
   }
 }
