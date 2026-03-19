@@ -77,7 +77,7 @@ export interface ExecutionResult {
 /** 分析发现 */
 export interface Finding {
   time: string;
-  type: 'lock' | 'unlock' | 'info' | 'error';
+  type: 'success' | 'warning' | 'info' | 'error';
   message: string;
   details?: Record<string, any>;
 }

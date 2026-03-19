@@ -43,8 +43,8 @@ function ConditionNode({ data }: NodeProps) {
          style={{ transform: 'rotate(0deg)', borderRadius: '4px', minWidth: 120 }}>
       <Handle type="target" position={Position.Top} className="!bg-amber-500" />
       <div className="font-bold">{data.label as string}</div>
-      {data.conditionText && (
-        <div className="text-[10px] mt-1 text-amber-700 truncate max-w-[160px]">{data.conditionText as string}</div>
+      {typeof data.conditionText === 'string' && data.conditionText && (
+        <div className="text-[10px] mt-1 text-amber-700 truncate max-w-[160px]">{data.conditionText}</div>
       )}
       <Handle type="source" position={Position.Bottom} id="true" className="!bg-green-500 !left-[30%]" />
       <Handle type="source" position={Position.Bottom} id="false" className="!bg-red-500 !left-[70%]" />
@@ -57,8 +57,8 @@ function ActionNode({ data }: NodeProps) {
     <div className="px-3 py-2 rounded border-2 border-blue-400 bg-blue-50 text-blue-900 text-xs text-center min-w-[100px]">
       <Handle type="target" position={Position.Top} className="!bg-blue-400" />
       <div className="font-bold">{data.label as string}</div>
-      {data.description && (
-        <div className="text-[10px] mt-1 text-blue-600 truncate max-w-[160px]">{data.description as string}</div>
+      {typeof data.description === 'string' && data.description && (
+        <div className="text-[10px] mt-1 text-blue-600 truncate max-w-[160px]">{data.description}</div>
       )}
       <Handle type="source" position={Position.Bottom} className="!bg-blue-400" />
     </div>

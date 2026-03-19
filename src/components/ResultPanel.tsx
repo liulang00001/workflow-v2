@@ -23,13 +23,13 @@ export default function ResultPanel({ result }: ResultPanelProps) {
           <div className="space-y-1">
             {result.findings.map((f, i) => (
               <div key={i} className={`p-2 rounded text-xs border-l-2 ${
-                f.type === 'lock' ? 'bg-green-50 border-green-400' :
-                f.type === 'unlock' ? 'bg-amber-50 border-amber-400' :
+                f.type === 'success' ? 'bg-green-50 border-green-400' :
+                f.type === 'warning' ? 'bg-amber-50 border-amber-400' :
                 f.type === 'error' ? 'bg-red-50 border-red-400' :
                 'bg-gray-50 border-gray-300'
               }`}>
                 <div className="flex items-center gap-2">
-                  <span>{f.type === 'lock' ? '🔒' : f.type === 'unlock' ? '🔓' : f.type === 'error' ? '❌' : 'ℹ️'}</span>
+                  <span>{f.type === 'success' ? '✅' : f.type === 'warning' ? '⚠️' : f.type === 'error' ? '❌' : 'ℹ️'}</span>
                   <span className="font-medium">{f.message}</span>
                 </div>
                 {f.time && <div className="mt-0.5 text-gray-500">时间: {f.time}</div>}

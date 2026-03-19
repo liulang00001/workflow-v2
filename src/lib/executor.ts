@@ -1,10 +1,11 @@
 /**
  * 代码执行器：在受控环境中执行 LLM 生成的分析代码
  *
- * 策略：将代码编译为 Function，注入受控的 context（data + console）
+ * 策略：用 ts-morph 将 TypeScript 编译为 JavaScript，再通过 Function 构造器执行
  * 生产环境可升级为 quickjs-emscripten 沙箱
  */
 import { DataTable, ExecutionResult, Finding } from './types';
+import { Project, ScriptTarget, ModuleKind } from 'ts-morph';
 
 /** 将 DataTable 转为 SignalRow[] 格式供分析函数使用 */
 function tableToSignalRows(table: DataTable): Record<string, any>[] {
@@ -33,24 +34,31 @@ function tableToSignalRows(table: DataTable): Record<string, any>[] {
   });
 }
 
-/** 从代码中提取 analyze 函数和辅助函数 */
-function extractFunctions(code: string): string {
-  // 移除 TypeScript 类型注解（简单处理）
-  let cleaned = code
-    // 移除 interface/type 定义块
-    .replace(/^(interface|type)\s+\w+\s*\{[^}]*\}/gm, '')
-    // 移除参数类型注解 (name: Type)
-    .replace(/:\s*(string|number|boolean|any|void|Record<[^>]+>|Array<[^>]+>|\w+\[\]|{\s*[^}]*})/g, '')
-    // 移除返回类型注解
-    .replace(/\)\s*:\s*\w+(\[\])?\s*\{/g, ') {')
-    // 移除泛型
-    .replace(/<[^>]+>/g, '')
-    // 移除 as 类型断言
-    .replace(/\s+as\s+\w+/g, '')
-    // 移除 export
-    .replace(/^export\s+/gm, '');
+/** 用 ts-morph 将 TypeScript 编译为 JavaScript */
+function compileTypeScript(code: string): string {
+  const project = new Project({
+    useInMemoryFileSystem: true,
+    compilerOptions: {
+      target: ScriptTarget.ES2020,
+      module: ModuleKind.None,
+      strict: false,
+      removeComments: false,
+    },
+  });
 
-  return cleaned;
+  const sourceFile = project.createSourceFile('analyze.ts', code);
+  const emitOutput = sourceFile.getEmitOutput();
+  const jsFile = emitOutput.getOutputFiles()[0];
+
+  if (!jsFile) {
+    throw new Error('TypeScript 编译失败：无输出');
+  }
+
+  return jsFile.getText()
+    .replace(/^"use strict";\s*/gm, '')
+    .replace(/^Object\.defineProperty\(exports.*\n?/gm, '')
+    .replace(/^exports\.\w+\s*=.*\n?/gm, '')
+    .replace(/^export\s+/gm, '');
 }
 
 /**
@@ -63,7 +71,7 @@ export function executeCode(code: string, table: DataTable): ExecutionResult {
 
   try {
     const data = tableToSignalRows(table);
-    const cleanedCode = extractFunctions(code);
+    const cleanedCode = compileTypeScript(code);
 
     // 构建可执行代码
     const execCode = `
