@@ -1,10 +1,17 @@
 'use client';
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import { FlowChart, DataTable, ExecutionResult, SignalDef } from '@/lib/types';
 import ResultPanel from '@/components/ResultPanel';
-import { FileUp, Play, Sparkles, Code2, GitBranch, Terminal } from 'lucide-react';
+import { FileUp, Play, Sparkles, Code2, GitBranch, Terminal, Save, FolderOpen, Trash2 } from 'lucide-react';
+
+interface SavedScript {
+  name: string;
+  fileName: string;
+  updatedAt: string;
+  size: number;
+}
 
 // 动态加载避免 SSR 问题
 const CodeEditor = dynamic(() => import('@/components/CodeEditor'), { ssr: false });
@@ -24,6 +31,42 @@ export default function Home() {
   const [activeTab, setActiveTab] = useState<Tab>('code');
   const [highlightRange, setHighlightRange] = useState<{ startLine: number; endLine: number } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // === 脚本管理 ===
+  const [savedScripts, setSavedScripts] = useState<SavedScript[]>([]);
+  const [saveName, setSaveName] = useState('');
+  const [showSaveInput, setShowSaveInput] = useState(false);
+
+  const loadScriptList = useCallback(async () => {
+    try {
+      const res = await fetch('/api/scripts');
+      const json = await res.json();
+      if (json.success) setSavedScripts(json.scripts);
+    } catch {}
+  }, []);
+
+  useEffect(() => { loadScriptList(); }, [loadScriptList]);
+
+  const handleSaveScript = useCallback(async () => {
+    if (!saveName.trim() || !code.trim()) return;
+    try {
+      const res = await fetch('/api/scripts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: saveName.trim(), code }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        setShowSaveInput(false);
+        setSaveName('');
+        loadScriptList();
+      } else {
+        setError(json.error);
+      }
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [saveName, code, loadScriptList]);
 
   // === 步骤 1: 自然语言 → 代码 ===
   const handleGenerate = useCallback(async () => {
@@ -76,6 +119,35 @@ export default function Home() {
     }
   }, [code]);
 
+  // === 脚本加载/删除 ===
+  const handleLoadScript = useCallback(async (name: string) => {
+    try {
+      const res = await fetch(`/api/scripts/${encodeURIComponent(name)}`);
+      const json = await res.json();
+      if (json.success) {
+        setCode(json.code);
+        setActiveTab('code');
+        parseFlowChart(json.code);
+      } else {
+        setError(json.error);
+      }
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [parseFlowChart]);
+
+  const handleDeleteScript = useCallback(async (name: string) => {
+    try {
+      const res = await fetch('/api/scripts', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      const json = await res.json();
+      if (json.success) loadScriptList();
+    } catch {}
+  }, [loadScriptList]);
+
   // === 文件上传 ===
   const handleFileUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -93,7 +165,7 @@ export default function Home() {
       return;
     }
 
-    const headers = raw[0].map(String);
+    const headers = raw[0].map((h: any) => String(h).replace(/[\r\n]+/g, '').trim());
     const rows = raw.slice(1).map(row =>
       headers.map((_, i) => {
         const v = row[i];
@@ -210,7 +282,7 @@ export default function Home() {
           )}
 
           {/* 状态信息 */}
-          <div className="flex-1 p-3 overflow-auto">
+          <div className="p-3 border-b border-[var(--border)]">
             <div className="space-y-2 text-xs text-[var(--muted)]">
               <div className="flex items-center gap-2">
                 <div className={`w-2 h-2 rounded-full ${code ? 'bg-green-400' : 'bg-gray-300'}`} />
@@ -228,6 +300,69 @@ export default function Home() {
                 <div className={`w-2 h-2 rounded-full ${result ? 'bg-green-400' : 'bg-gray-300'}`} />
                 <span>结果 {result ? `✓ (${result.findings.length} 发现)` : '未执行'}</span>
               </div>
+            </div>
+          </div>
+
+          {/* 代码管理 */}
+          <div className="flex-1 flex flex-col overflow-hidden">
+            <div className="p-3 flex items-center justify-between">
+              <label className="text-xs font-bold text-[var(--muted)] uppercase">历史代码</label>
+              <button
+                onClick={() => { setShowSaveInput(!showSaveInput); setSaveName(''); }}
+                disabled={!code}
+                className="flex items-center gap-1 px-2 py-1 text-xs text-[var(--muted)] hover:text-[var(--accent)] transition disabled:opacity-40"
+              >
+                <Save size={12} />
+                保存当前
+              </button>
+            </div>
+
+            {showSaveInput && (
+              <div className="px-3 pb-2 flex gap-1">
+                <input
+                  value={saveName}
+                  onChange={e => setSaveName(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && handleSaveScript()}
+                  placeholder="输入脚本名称..."
+                  className="flex-1 px-2 py-1 text-xs border border-[var(--border)] rounded bg-transparent"
+                  autoFocus
+                />
+                <button
+                  onClick={handleSaveScript}
+                  disabled={!saveName.trim()}
+                  className="px-2 py-1 text-xs bg-[var(--accent)] text-white rounded disabled:opacity-40"
+                >
+                  保存
+                </button>
+              </div>
+            )}
+
+            <div className="flex-1 overflow-auto px-3 pb-3">
+              {savedScripts.length === 0 ? (
+                <div className="text-xs text-[var(--muted)] text-center py-4">暂无保存的脚本</div>
+              ) : (
+                <div className="space-y-1">
+                  {savedScripts.map(s => (
+                    <div key={s.name} className="group flex items-center gap-1 p-2 rounded hover:bg-[var(--accent-light)] transition text-xs cursor-pointer"
+                         onClick={() => handleLoadScript(s.name)}>
+                      <FolderOpen size={12} className="text-[var(--muted)] shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <div className="font-medium truncate">{s.name}</div>
+                        <div className="text-[var(--muted)] text-[10px]">
+                          {new Date(s.updatedAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                        </div>
+                      </div>
+                      <button
+                        onClick={e => { e.stopPropagation(); handleDeleteScript(s.name); }}
+                        className="opacity-0 group-hover:opacity-100 p-1 text-red-400 hover:text-red-600 transition"
+                        title="删除"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -296,7 +431,7 @@ export default function Home() {
 
             {activeTab === 'result' && (
               result ? (
-                <ResultPanel result={result} />
+                <ResultPanel result={result} code={code} />
               ) : (
                 <div className="h-full flex items-center justify-center text-[var(--muted)]">
                   请上传数据并执行分析
