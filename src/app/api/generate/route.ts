@@ -1,6 +1,7 @@
 /**
  * API: 自然语言 → TypeScript 分析代码
  */
+import { getConfig } from '@/lib/config';
 import { NextRequest, NextResponse } from 'next/server';
 import { SYSTEM_PROMPT } from '@/lib/prompts';
 
@@ -18,12 +19,10 @@ export async function POST(request: NextRequest) {
     // 调用 LLM
     // TODO: 替换为实际的 LLM 调用（OpenAI / 豆包 / Claude）
     // 这里提供一个通用接口
-    const apiKey = process.env.LLM_API_KEY;
-    const apiBase = process.env.LLM_API_BASE || 'https://api.openai.com/v1';
-    const model = process.env.LLM_MODEL || 'gpt-4o';
+    const { apiKey, apiBase, model } = getConfig().llm;
 
     if (!apiKey) {
-      return NextResponse.json({ success: false, error: '未配置 LLM_API_KEY 环境变量' }, { status: 500 });
+      return NextResponse.json({ success: false, error: '未配置 LLM apiKey（请检查 config.json）' }, { status: 500 });
     }
 
     console.log('[generate] Calling LLM...');

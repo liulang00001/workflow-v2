@@ -24,7 +24,7 @@ function nextEdgeId() { return `edge_${++edgeCounter}`; }
 interface PendingEdge {
   source: string;
   label?: string;
-  type?: string;
+  type?: 'true' | 'false' | 'next' | 'loop-back';
 }
 
 /** 从 TypeScript 代码解析出流程图 */

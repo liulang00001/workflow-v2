@@ -4,7 +4,9 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import { FlowChart, DataTable, ExecutionResult, SignalDef } from '@/lib/types';
 import ResultPanel from '@/components/ResultPanel';
-import { FileUp, Play, Sparkles, Code2, GitBranch, Terminal, Save, FolderOpen, Trash2 } from 'lucide-react';
+import LogicVerifyPanel, { VerifyResult, VerifyItem, FixReport, DiffInfo, ParsedLogic } from '@/components/LogicVerifyPanel';
+import DataPreviewPanel from '@/components/DataPreviewPanel';
+import { FileUp, Play, Sparkles, Code2, GitBranch, Terminal, Save, FolderOpen, Trash2, Shield, Table2 } from 'lucide-react';
 
 interface SavedScript {
   name: string;
@@ -17,7 +19,7 @@ interface SavedScript {
 const CodeEditor = dynamic(() => import('@/components/CodeEditor'), { ssr: false });
 const FlowChartView = dynamic(() => import('@/components/FlowChart'), { ssr: false });
 
-type Tab = 'code' | 'flow' | 'result';
+type Tab = 'code' | 'verify' | 'flow' | 'data' | 'result';
 
 export default function Home() {
   // === 核心状态 ===
@@ -25,12 +27,24 @@ export default function Home() {
   const [code, setCode] = useState('');
   const [flowChart, setFlowChart] = useState<FlowChart | null>(null);
   const [data, setData] = useState<DataTable | null>(null);
+  const [headerOverrides, setHeaderOverrides] = useState<Record<number, string>>({});
   const [result, setResult] = useState<ExecutionResult | null>(null);
   const [status, setStatus] = useState<'idle' | 'generating' | 'parsing' | 'executing'>('idle');
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>('code');
   const [highlightRange, setHighlightRange] = useState<{ startLine: number; endLine: number } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // === 逻辑校验状态 ===
+  const [codeVersion, setCodeVersion] = useState(1);
+  const [verifyResult, setVerifyResult] = useState<VerifyResult | null>(null);
+  const [fixReport, setFixReport] = useState<FixReport | null>(null);
+  const [verifyHistory, setVerifyHistory] = useState<{ version: number; result: VerifyResult; timestamp: string }[]>([]);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [isFixing, setIsFixing] = useState(false);
+  const [diffInfo, setDiffInfo] = useState<DiffInfo | null>(null);
+  const [parsedLogic, setParsedLogic] = useState<ParsedLogic | null>(null);
+  const [isParsing, setIsParsing] = useState(false);
 
   // === 脚本管理 ===
   const [savedScripts, setSavedScripts] = useState<SavedScript[]>([]);
@@ -84,6 +98,12 @@ export default function Home() {
       if (!json.success) throw new Error(json.error);
 
       setCode(json.code);
+      setCodeVersion(1);
+      setVerifyResult(null);
+      setFixReport(null);
+      setDiffInfo(null);
+      setParsedLogic(null);
+      setVerifyHistory([]);
       setActiveTab('code');
 
       // 自动解析流程图
@@ -176,8 +196,20 @@ export default function Home() {
     );
 
     setData({ headers, rows, fileName: file.name });
+    setHeaderOverrides({});
     setError(null);
+    setActiveTab('data');
   }, []);
+
+  /** 构建应用了编辑后表头的数据 */
+  const getEffectiveData = useCallback((): DataTable | null => {
+    if (!data) return null;
+    const effectiveHeaders = data.headers.map((h, i) => {
+      if (i in headerOverrides) return headerOverrides[i];
+      return h.replace(/[\r\n]+/g, '').trim();
+    });
+    return { ...data, headers: effectiveHeaders };
+  }, [data, headerOverrides]);
 
   // === 步骤 3: 执行代码 ===
   const handleExecute = useCallback(async () => {
@@ -188,11 +220,12 @@ export default function Home() {
     setStatus('executing');
     setError(null);
 
+    const effectiveData = getEffectiveData();
     try {
       const res = await fetch('/api/execute', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code, data }),
+        body: JSON.stringify({ code, data: effectiveData }),
       });
       const json = await res.json();
       if (!json.success) throw new Error(json.error);
@@ -204,7 +237,116 @@ export default function Home() {
     } finally {
       setStatus('idle');
     }
-  }, [code, data]);
+  }, [code, data, getEffectiveData]);
+
+  // === 自然语言解析（只需一次） ===
+  const handleParseNL = useCallback(async () => {
+    if (!description.trim()) return;
+    setIsParsing(true);
+
+    try {
+      const res = await fetch('/api/parse-nl', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ description }),
+      });
+      const json = await res.json();
+      if (!json.success) {
+        const debugInfo = json.debug ? `\n[debug] ${json.debug.preview || JSON.stringify(json.debug)}` : '';
+        throw new Error(json.error + debugInfo);
+      }
+
+      setParsedLogic(json.parsedLogic);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setIsParsing(false);
+    }
+  }, [description]);
+
+  // === 逻辑校验（复用已解析的逻辑点） ===
+  const handleVerify = useCallback(async () => {
+    if (!parsedLogic || !code.trim()) return;
+    setIsVerifying(true);
+    setVerifyResult(null);
+    setFixReport(null);
+
+    try {
+      const res = await fetch('/api/verify-logic', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parsedLogic, code }),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error);
+
+      setVerifyResult(json.result);
+      setVerifyHistory(prev => [...prev, {
+        version: codeVersion,
+        result: json.result,
+        timestamp: new Date().toISOString(),
+      }]);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setIsVerifying(false);
+    }
+  }, [parsedLogic, code, codeVersion]);
+
+  // === 逻辑修复 ===
+  const handleFix = useCallback(async (failedItems: VerifyItem[]) => {
+    if (!code.trim() || failedItems.length === 0) return;
+    setIsFixing(true);
+
+    try {
+      const res = await fetch('/api/fix-logic', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code,
+          fixItems: failedItems,
+          version: codeVersion,
+          description,
+        }),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error);
+
+      // 更新代码和版本
+      setCode(json.code);
+      setCodeVersion(json.version);
+      setFixReport(json.fixReport);
+      setDiffInfo(json.diff || null);
+
+      // 自动重新解析流程图
+      await parseFlowChart(json.code);
+
+      // 修复完成后自动再次校验
+      setIsFixing(false);
+      setIsVerifying(true);
+      setVerifyResult(null);
+
+      const verifyRes = await fetch('/api/verify-logic', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parsedLogic, code: json.code }),
+      });
+      const verifyJson = await verifyRes.json();
+      if (verifyJson.success) {
+        setVerifyResult(verifyJson.result);
+        setVerifyHistory(prev => [...prev, {
+          version: json.version,
+          result: verifyJson.result,
+          timestamp: new Date().toISOString(),
+        }]);
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setIsVerifying(false);
+      setIsFixing(false);
+    }
+  }, [code, codeVersion, description, parsedLogic, parseFlowChart]);
 
   // === 流程图节点点击 → 高亮代码 ===
   const handleNodeClick = useCallback((nodeId: string, codeRange: { startLine: number; endLine: number }) => {
@@ -291,6 +433,19 @@ export default function Home() {
               <div className="flex items-center gap-2">
                 <div className={`w-2 h-2 rounded-full ${flowChart ? 'bg-green-400' : 'bg-gray-300'}`} />
                 <span>流程图 {flowChart ? `✓ (${flowChart.nodes.length} 节点)` : '未解析'}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className={`w-2 h-2 rounded-full ${parsedLogic ? 'bg-green-400' : 'bg-gray-300'}`} />
+                <span>需求解析 {parsedLogic ? `✓ (${parsedLogic.totalPoints} 逻辑点)` : '未解析'}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className={`w-2 h-2 rounded-full ${
+                  verifyResult ? (verifyResult.passed ? 'bg-green-400' : 'bg-red-400') : 'bg-gray-300'
+                }`} />
+                <span>逻辑校验 {verifyResult
+                  ? (verifyResult.passed ? `✓ 全部通过` : `⚠ ${verifyResult.failedChecks}项差异`)
+                  : '未校验'} <span className="text-[10px]">v{codeVersion}</span>
+                </span>
               </div>
               <div className="flex items-center gap-2">
                 <div className={`w-2 h-2 rounded-full ${data ? 'bg-green-400' : 'bg-gray-300'}`} />
@@ -380,12 +535,40 @@ export default function Home() {
               <Code2 size={14} /> 代码
             </button>
             <button
+              onClick={() => setActiveTab('verify')}
+              className={`flex items-center gap-1.5 px-4 py-2 text-sm border-b-2 transition ${
+                activeTab === 'verify' ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-transparent text-[var(--muted)]'
+              }`}
+            >
+              <Shield size={14} /> 逻辑校验
+              {verifyResult && (
+                <span className={`ml-1 px-1.5 py-0.5 text-[10px] rounded-full ${
+                  verifyResult.passed ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+                }`}>
+                  {verifyResult.passedChecks}/{verifyResult.totalChecks}
+                </span>
+              )}
+            </button>
+            <button
               onClick={() => { setActiveTab('flow'); if (code && !flowChart) handleReparseFlow(); }}
               className={`flex items-center gap-1.5 px-4 py-2 text-sm border-b-2 transition ${
                 activeTab === 'flow' ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-transparent text-[var(--muted)]'
               }`}
             >
               <GitBranch size={14} /> 流程图
+            </button>
+            <button
+              onClick={() => setActiveTab('data')}
+              className={`flex items-center gap-1.5 px-4 py-2 text-sm border-b-2 transition ${
+                activeTab === 'data' ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-transparent text-[var(--muted)]'
+              }`}
+            >
+              <Table2 size={14} /> 数据
+              {data && (
+                <span className="ml-1 px-1.5 py-0.5 text-[10px] rounded-full bg-blue-100 text-blue-700">
+                  {data.rows.length}行
+                </span>
+              )}
             </button>
             <button
               onClick={() => setActiveTab('result')}
@@ -419,6 +602,25 @@ export default function Home() {
               />
             )}
 
+            {activeTab === 'verify' && (
+              <LogicVerifyPanel
+                description={description}
+                code={code}
+                codeVersion={codeVersion}
+                parsedLogic={parsedLogic}
+                isParsing={isParsing}
+                verifyResult={verifyResult}
+                fixReport={fixReport}
+                diffInfo={diffInfo}
+                verifyHistory={verifyHistory}
+                isVerifying={isVerifying}
+                isFixing={isFixing}
+                onParseNL={handleParseNL}
+                onVerify={handleVerify}
+                onFix={handleFix}
+              />
+            )}
+
             {activeTab === 'flow' && (
               flowChart ? (
                 <FlowChartView flowChart={flowChart} onNodeClick={handleNodeClick} />
@@ -427,6 +629,20 @@ export default function Home() {
                   {code ? '点击"重新解析流程图"生成' : '请先生成代码'}
                 </div>
               )
+            )}
+
+            {activeTab === 'data' && (
+              <DataPreviewPanel
+                data={data}
+                headerOverrides={headerOverrides}
+                onHeaderRename={(idx, name) => setHeaderOverrides(prev => ({ ...prev, [idx]: name }))}
+                onHeaderReset={(idx) => setHeaderOverrides(prev => {
+                  const next = { ...prev };
+                  delete next[idx];
+                  return next;
+                })}
+                onHeaderResetAll={() => setHeaderOverrides({})}
+              />
             )}
 
             {activeTab === 'result' && (
