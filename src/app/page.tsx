@@ -5,7 +5,7 @@ import dynamic from 'next/dynamic';
 import { FlowChart, DataTable, ExecutionResult, SignalDef } from '@/lib/types';
 import ResultPanel from '@/components/ResultPanel';
 import LogicVerifyPanel, { VerifyResult, VerifyItem, FixReport, DiffInfo, ParsedLogic } from '@/components/LogicVerifyPanel';
-import DataPreviewPanel from '@/components/DataPreviewPanel';
+import DataPreviewPanel, { formatHeader } from '@/components/DataPreviewPanel';
 import { FileUp, Play, Sparkles, Code2, GitBranch, Terminal, Save, FolderOpen, Trash2, Shield, Table2 } from 'lucide-react';
 
 interface SavedScript {
@@ -206,7 +206,7 @@ export default function Home() {
     if (!data) return null;
     const effectiveHeaders = data.headers.map((h, i) => {
       if (i in headerOverrides) return headerOverrides[i];
-      return h.replace(/[\r\n]+/g, '').trim();
+      return formatHeader(h);
     });
     return { ...data, headers: effectiveHeaders };
   }, [data, headerOverrides]);

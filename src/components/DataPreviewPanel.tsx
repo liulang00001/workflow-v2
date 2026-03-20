@@ -113,6 +113,22 @@ const TYPE_LABELS: Record<ColType, string> = {
   mixed: '混合',
 };
 
+/** 自动格式化表头：特殊映射 → 剔除中文 → 清理空白 */
+export function formatHeader(raw: string): string {
+  let h = raw.replace(/[\r\n]+/g, '').trim();
+
+  // 特殊映射：含"采集时间"的列名 → time
+  if (/采集时间/.test(h)) return 'time';
+
+  // 剔除中文字符（保留英文、数字、下划线、点、中横线）
+  h = h.replace(/[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/g, '');
+
+  // 清理多余空白和首尾特殊字符
+  h = h.replace(/\s+/g, '_').replace(/^[_\-]+|[_\-]+$/g, '');
+
+  return h || raw.replace(/[\r\n]+/g, '').trim(); // fallback：如果全是中文，保留原始清理值
+}
+
 export default function DataPreviewPanel({ data, headerOverrides, onHeaderRename, onHeaderReset, onHeaderResetAll }: DataPreviewPanelProps) {
   const [showAllCols, setShowAllCols] = useState(false);
   const [searchHeader, setSearchHeader] = useState('');
@@ -129,7 +145,7 @@ export default function DataPreviewPanel({ data, headerOverrides, onHeaderRename
     if (!data) return [];
 
     return data.headers.map((rawHeader, idx) => {
-      const autoClean = rawHeader.replace(/[\r\n]+/g, '').trim();
+      const autoClean = formatHeader(rawHeader);
       // 用户编辑过的列名优先
       const cleanHeader = headerOverrides[idx] ?? autoClean;
       const wasFormatted = cleanHeader !== rawHeader;
