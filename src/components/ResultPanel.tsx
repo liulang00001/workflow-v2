@@ -101,21 +101,18 @@ export default function ResultPanel({ result, code }: ResultPanelProps) {
             下载调试日志
           </button>
         </div>
-        <div className="mt-1">{result.summary}</div>
-        <div className="mt-1 text-xs opacity-70">耗时 {result.duration}ms</div>
-      </div>
-
-      {/* 分析报告（代码 console.log 输出） */}
-      {result.report && result.report.length > 0 && (
-        <div>
-          <h3 className="font-bold mb-2">分析报告 ({result.report.length})</h3>
-          <div className="bg-white border border-gray-200 rounded p-3 text-xs font-mono space-y-0.5 max-h-80 overflow-auto">
+        {/* 分析报告替换摘要文字 */}
+        {result.report && result.report.length > 0 ? (
+          <div className="mt-2 bg-white/60 rounded p-2 text-xs font-mono space-y-0.5 max-h-60 overflow-auto">
             {result.report.map((line, i) => (
-              <div key={i} className="text-gray-800">{line}</div>
+              <div key={i} className="leading-relaxed">{line}</div>
             ))}
           </div>
-        </div>
-      )}
+        ) : (
+          <div className="mt-1">{result.summary}</div>
+        )}
+        <div className="mt-1 text-xs opacity-70">耗时 {result.duration}ms</div>
+      </div>
 
       {/* 发现列表 */}
       {result.findings.length > 0 && (
