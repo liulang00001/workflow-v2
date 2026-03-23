@@ -6,6 +6,16 @@
  */
 import { DataTable, ExecutionResult, Finding } from './types';
 import { Project, ScriptTarget, ModuleKind, SyntaxKind } from 'ts-morph';
+import {
+  scanAll, checkValue, checkMultiValues,
+  detectTransition, detectMultiTransition,
+  checkTimeRange, loopScan, switchValue, forEachEvent,
+  aggregate, detectDuration, countOccurrences,
+  findFirst, findAll,
+  // V2.1 新增模块
+  compareSignals, detectSequence, slidingWindow,
+  detectStable, detectOscillation, computeRate, groupByState,
+} from './standard-modules';
 
 /** 将 DataTable 转为 SignalRow[] 格式供分析函数使用 */
 function tableToSignalRows(table: DataTable): Record<string, any>[] {
@@ -174,12 +184,33 @@ export function executeCode(code: string, table: DataTable): ExecutionResult {
       },
     };
 
-    // 用 Function 构造器执行（受控作用域）
-    const fn = new Function('__data', 'console', 'Math', 'JSON', 'Array', 'Object', 'Number', 'String', 'Boolean', 'Date', 'isNaN', 'parseInt', 'parseFloat', 'Infinity', 'NaN', 'undefined',
+    // 用 Function 构造器执行（受控作用域，注入标准模块）
+    const fn = new Function(
+      '__data', 'console', 'Math', 'JSON', 'Array', 'Object', 'Number', 'String', 'Boolean', 'Date', 'isNaN', 'parseInt', 'parseFloat', 'Infinity', 'NaN', 'undefined',
+      // 标准模块注入
+      'scanAll', 'checkValue', 'checkMultiValues',
+      'detectTransition', 'detectMultiTransition',
+      'checkTimeRange', 'loopScan', 'switchValue', 'forEachEvent',
+      'aggregate', 'detectDuration', 'countOccurrences',
+      'findFirst', 'findAll',
+      // V2.1 新增模块
+      'compareSignals', 'detectSequence', 'slidingWindow',
+      'detectStable', 'detectOscillation', 'computeRate', 'groupByState',
       execCode
     );
 
-    const result = fn(data, safeConsole, Math, JSON, Array, Object, Number, String, Boolean, Date, isNaN, parseInt, parseFloat, Infinity, NaN, undefined);
+    const result = fn(
+      data, safeConsole, Math, JSON, Array, Object, Number, String, Boolean, Date, isNaN, parseInt, parseFloat, Infinity, NaN, undefined,
+      // 标准模块函数
+      scanAll, checkValue, checkMultiValues,
+      detectTransition, detectMultiTransition,
+      checkTimeRange, loopScan, switchValue, forEachEvent,
+      aggregate, detectDuration, countOccurrences,
+      findFirst, findAll,
+      // V2.1 新增模块
+      compareSignals, detectSequence, slidingWindow,
+      detectStable, detectOscillation, computeRate, groupByState
+    );
 
     const duration = Date.now() - startTime;
 
